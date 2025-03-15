@@ -229,10 +229,8 @@ def get_dest_events(dest_calendar, normalized_title):
             event_component = event_ical.subcomponents[0]
 
             # Check if this is our synced event by title and custom property
-            if (
-                event_component.get("SUMMARY", "") == normalized_title
-                and "X-SYNC-SOURCE-UID" in event_component
-            ):
+            if (event_component.get('SUMMARY', '') == normalized_title and
+                    'X-SYNC-SOURCE-IDENTIFIER' in event_component):
                 synced_events.append(event)
 
         return synced_events
@@ -242,13 +240,13 @@ def get_dest_events(dest_calendar, normalized_title):
         return []
 
 
-def find_synced_event(synced_events, source_event_uid):
-    """Find the synced event in the destination calendar matching the source UID."""
+def find_synced_event(synced_events, source_event_identifier):
+    """Find the synced event in the destination calendar matching the source identifier."""
     for event in synced_events:
         event_ical = event.icalendar_instance
         event_component = event_ical.subcomponents[0]
 
-        if event_component.get("X-SYNC-SOURCE-UID", "") == source_event_uid:
+        if event_component.get('X-SYNC-SOURCE-IDENTIFIER', '') == source_event_identifier:
             return event
 
     return None
@@ -334,36 +332,35 @@ def event_details_changed(source_event, synced_event):
     return False
 
 
-def create_or_update_event(
-    dest_calendar, source_event, normalized_title, existing_event=None
-):
+def create_or_update_event(dest_calendar, source_event, normalized_title, existing_event=None):
     """Create a new event or update an existing event in the destination calendar."""
     try:
-        source_uid = get_source_event_uid(source_event)
+        # Generate a stable identifier for the source event
+        source_identifier = generate_event_identifier(source_event)
 
         # Create a new calendar with a single event
         new_cal = Calendar()
         new_event = Event()
 
         # Copy over the essential properties
-        for key in ["DTSTART", "DTEND", "LOCATION", "DESCRIPTION"]:
+        for key in ['DTSTART', 'DTEND', 'LOCATION', 'DESCRIPTION']:
             if key in source_event:
                 new_event[key] = source_event[key]
 
         # Set normalized title
-        new_event["SUMMARY"] = normalized_title
+        new_event['SUMMARY'] = normalized_title
 
         # Set UID - either keep existing or generate new
         if existing_event:
             existing_ical = existing_event.icalendar_instance
             existing_component = existing_ical.subcomponents[0]
-            existing_uid = existing_component["UID"]
-            new_event["UID"] = existing_uid
+            existing_uid = existing_component['UID']
+            new_event['UID'] = existing_uid
         else:
-            new_event["UID"] = str(uuid.uuid4())
+            new_event['UID'] = str(uuid.uuid4())
 
-        # Add custom property to link to source event
-        new_event["X-SYNC-SOURCE-UID"] = source_uid
+        # Add our stable identifier property
+        new_event['X-SYNC-SOURCE-IDENTIFIER'] = source_identifier
 
         # Add event to calendar
         new_cal.add_component(new_event)
@@ -372,14 +369,10 @@ def create_or_update_event(
         if existing_event:
             existing_event.data = new_cal.to_ical()
             existing_event.save()
-            logger.info(
-                f"Updated existing event: {normalized_title} (Source UID: {source_uid})"
-            )
+            logger.info(f"Updated existing event: {normalized_title} (Source Identifier: {source_identifier})")
         else:
             dest_calendar.save_event(new_cal.to_ical())
-            logger.info(
-                f"Created new event: {normalized_title} (Source UID: {source_uid})"
-            )
+            logger.info(f"Created new event: {normalized_title} (Source Identifier: {source_identifier})")
 
         return True
 
@@ -392,10 +385,10 @@ def sync_calendars(config):
     """Synchronize events from source to destination calendar."""
     # Connect to destination calendar (CalDAV)
     dest_calendar = connect_to_dest_calendar(
-        config["dest_url"],
-        config["dest_username"],
-        config["dest_password"],
-        config["dest_calendar_name"],
+        config['dest_url'],
+        config['dest_username'],
+        config['dest_password'],
+        config['dest_calendar_name']
     )
 
     if not dest_calendar:
@@ -403,83 +396,118 @@ def sync_calendars(config):
         return False
 
     # Fetch source calendar (iCalendar over HTTPS)
-    source_calendar = fetch_source_calendar(config["source_url"])
+    source_calendar = fetch_source_calendar(config['source_url'])
 
     if not source_calendar:
         logger.error("Failed to fetch source calendar")
         return False
 
     # Define date range for events
-    now = datetime.now(config["timezone"])
-    end_date = now + timedelta(days=config["days_ahead"])
+    now = datetime.now(config['timezone'])
+    end_date = now + timedelta(days=config['days_ahead'])
 
     # Get events from source calendar within date range
-    source_events = get_source_events(
-        source_calendar, now, end_date, config["timezone"]
-    )
-    logger.info(
-        f"Found {len(source_events)} events in source calendar within date range"
-    )
+    source_events = get_source_events(source_calendar, now, end_date, config['timezone'])
+    logger.info(f"Found {len(source_events)} events in source calendar within date range")
 
     # Get all existing synced events from destination calendar
-    dest_events = get_dest_events(dest_calendar, config["normalized_title"])
-    logger.info(
-        f"Found {len(dest_events)} existing synced events in destination calendar"
-    )
+    dest_events = get_dest_events(dest_calendar, config['normalized_title'])
+    logger.info(f"Found {len(dest_events)} existing synced events in destination calendar")
 
-    # Keep track of processed source event UIDs
-    processed_source_uids = set()
+    # Keep track of processed source event identifiers
+    processed_source_identifiers = set()
 
     # Process each source event
     for source_event in source_events:
-        source_uid = get_source_event_uid(source_event)
-        synced_event = find_synced_event(dest_events, source_uid)
+        # Generate a stable identifier for the source event
+        source_identifier = generate_event_identifier(source_event)
 
-        # Add to our set of processed UIDs
-        processed_source_uids.add(source_uid)
+        # Add to our set of processed identifiers
+        processed_source_identifiers.add(source_identifier)
+
+        # Find matching event in destination calendar
+        synced_event = find_synced_event(dest_events, source_identifier)
 
         if synced_event:
             # Check if event details have changed
             if event_details_changed(source_event, synced_event):
-                create_or_update_event(
-                    dest_calendar,
-                    source_event,
-                    config["normalized_title"],
-                    synced_event,
-                )
+                create_or_update_event(dest_calendar, source_event,
+                                       config['normalized_title'], synced_event)
             else:
-                logger.debug(f"No changes needed for event with UID: {source_uid}")
+                logger.debug(f"No changes needed for event with identifier: {source_identifier}")
         else:
             # Create new event
-            create_or_update_event(
-                dest_calendar, source_event, config["normalized_title"]
-            )
+            create_or_update_event(dest_calendar, source_event, config['normalized_title'])
 
     # Remove destination events that no longer exist in source
     removed_count = 0
     for dest_event in dest_events:
         event_ical = dest_event.icalendar_instance
         event_component = event_ical.subcomponents[0]
-        source_uid = event_component.get("X-SYNC-SOURCE-UID", "")
+        source_identifier = event_component.get('X-SYNC-SOURCE-IDENTIFIER', '')
 
-        if source_uid and source_uid not in processed_source_uids:
+        if source_identifier and source_identifier not in processed_source_identifiers:
             # This event no longer exists in source, delete it
             try:
                 dest_event.delete()
                 removed_count += 1
-                logger.info(
-                    f"Deleted event from destination calendar (Source UID: {source_uid})"
-                )
+                logger.info(f"Deleted event from destination calendar (Source Identifier: {source_identifier})")
             except Exception as e:
-                logger.error(f"Error deleting event with Source UID {source_uid}: {e}")
+                logger.error(f"Error deleting event with Source Identifier {source_identifier}: {e}")
 
     if removed_count > 0:
-        logger.info(
-            f"Removed {removed_count} events from destination calendar that no longer exist in source"
-        )
+        logger.info(f"Removed {removed_count} events from destination calendar that no longer exist in source")
 
     return True
 
+
+def generate_event_identifier(event):
+    """Generate a stable identifier for an event based on its properties.
+
+    This creates a hash of the event's core properties (date, time, summary)
+    that should remain consistent even if the event is deleted and recreated.
+    """
+    try:
+        # Extract key properties
+        dtstart = event.get('dtstart').dt
+
+        # Handle all-day events vs. time-specific events
+        if isinstance(dtstart, datetime):
+            date_str = dtstart.strftime('%Y%m%d%H%M')
+        else:
+            date_str = dtstart.strftime('%Y%m%d')
+
+        # Get duration or end time
+        if event.get('dtend'):
+            dtend = event.get('dtend').dt
+            if isinstance(dtend, datetime):
+                end_str = dtend.strftime('%Y%m%d%H%M')
+            else:
+                end_str = dtend.strftime('%Y%m%d')
+        else:
+            end_str = date_str
+
+        # Get original summary (before normalization)
+        summary = event.get('summary', '')
+
+        # Get location if available
+        location = event.get('location', '')
+
+        # Combine properties to create a stable identifier
+        # Include enough properties to make it unique, but not so many that minor changes break matching
+        id_string = f"{date_str}_{end_str}_{summary}_{location}"
+
+        # Create a hash of this string
+        import hashlib
+        return hashlib.md5(id_string.encode('utf-8')).hexdigest()
+
+    except Exception as e:
+        logger.error(f"Error generating event identifier: {e}")
+        # Fall back to UID if available, or generate a random one
+        try:
+            return event.get('uid', str(uuid.uuid4()))
+        except:
+            return str(uuid.uuid4())
 
 def main():
     """Main function to run the calendar sync."""
