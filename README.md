@@ -8,7 +8,7 @@ This tool was created to solve a specific problem: keeping track of a work sched
 
 I had already created a similar script, so this version became an experiment for an old-school python developer using AI tools.
 I used the Claude Sonnet 3.7 thinking model via [OpenRouter.ai](openrouter.ai) and a self-hosted [OpenWebUI](https://github.com/open-webui/open-webui) instance to generate all the code and commit messages via chat. 
-The solutions developed by Claude were very similar to what I originally wrote, but there definitely were some ideas Claude had that I missed in my original script.
+The solutions developed by Claude were very similar to what I originally wrote, but there definitely were some ideas Claude had that I missed in my original script. The transcript of the conversation is available [here](transcript.md).
 
 Total cost of this experiment was $0.09 (!!) and 3 hours of my time start to finish.
 
