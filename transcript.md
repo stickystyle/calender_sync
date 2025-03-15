@@ -2622,3 +2622,703 @@ The updated test now properly sets up the `__contains__` method for each mock ev
 - Event 3: Both 'SUMMARY' and 'X-SYNC-SOURCE-UID' are present, but SUMMARY has the wrong value
 
 This ensures our test accurately reflects what happens in the real implementation.
+
+### USER
+There is a problem. Since the events in the source calendar get deleted, and then recreated, their `UID` value changes, thus triggering a recreation of the events in the destination calendar and defeating the original purpose of this script. We need to find another method to uniquely identify the source event, perhaps creating a hash of the `SUMMARY` value in the source event and using it like the `UID` value.
+
+### ASSISTANT
+# Fixing Event Identification for Recreation Issue
+
+You've identified a significant problem with the current implementation. When source events are deleted and recreated by the scheduling system, they get new UIDs, which breaks our synchronization logic and defeats the purpose of this tool.
+
+## Solution: Stable Event Identification
+
+Let's create a more stable way to identify events by using their core properties instead of relying on UIDs. This way, even if events are deleted and recreated, we can still recognize them as the "same" event.
+
+### Core Changes Needed
+
+1. Create a function to generate a stable identifier based on event properties
+2. Use this identifier instead of the UID for tracking events across calendar systems
+3. Update the search and comparison logic to use this stable identifier
+
+## Implementation
+
+First, let's add a function to generate a stable identifier:
+
+```python
+def generate_event_identifier(event):
+    """Generate a stable identifier for an event based on its properties.
+    
+    This creates a hash of the event's core properties (date, time, summary)
+    that should remain consistent even if the event is deleted and recreated.
+    """
+    try:
+        # Extract key properties
+        dtstart = event.get('dtstart').dt
+        
+        # Handle all-day events vs. time-specific events
+        if isinstance(dtstart, datetime):
+            date_str = dtstart.strftime('%Y%m%d%H%M')
+        else:
+            date_str = dtstart.strftime('%Y%m%d')
+        
+        # Get duration or end time
+        if event.get('dtend'):
+            dtend = event.get('dtend').dt
+            if isinstance(dtend, datetime):
+                end_str = dtend.strftime('%Y%m%d%H%M')
+            else:
+                end_str = dtend.strftime('%Y%m%d')
+        else:
+            end_str = date_str
+        
+        # Get original summary (before normalization)
+        summary = event.get('summary', '')
+        
+        # Get location if available
+        location = event.get('location', '')
+        
+        # Combine properties to create a stable identifier
+        # Include enough properties to make it unique, but not so many that minor changes break matching
+        id_string = f"{date_str}_{end_str}_{summary}_{location}"
+        
+        # Create a hash of this string
+        import hashlib
+        return hashlib.md5(id_string.encode('utf-8')).hexdigest()
+    
+    except Exception as e:
+        logger.error(f"Error generating event identifier: {e}")
+        # Fall back to UID if available, or generate a random one
+        try:
+            return event.get('uid', str(uuid.uuid4()))
+        except:
+            return str(uuid.uuid4())
+```
+
+Next, let's update the relevant functions to use this identifier:
+
+```python
+def find_synced_event(synced_events, source_event_identifier):
+    """Find the synced event in the destination calendar matching the source identifier."""
+    for event in synced_events:
+        event_ical = event.icalendar_instance
+        event_component = event_ical.subcomponents[0]
+        
+        if event_component.get('X-SYNC-SOURCE-IDENTIFIER', '') == source_event_identifier:
+            return event
+    
+    return None
+
+def create_or_update_event(dest_calendar, source_event, normalized_title, existing_event=None):
+    """Create a new event or update an existing event in the destination calendar."""
+    try:
+        # Generate a stable identifier for the source event
+        source_identifier = generate_event_identifier(source_event)
+        
+        # Create a new calendar with a single event
+        new_cal = Calendar()
+        new_event = Event()
+        
+        # Copy over the essential properties
+        for key in ['DTSTART', 'DTEND', 'LOCATION', 'DESCRIPTION']:
+            if key in source_event:
+                new_event[key] = source_event[key]
+        
+        # Set normalized title
+        new_event['SUMMARY'] = normalized_title
+        
+        # Set UID - either keep existing or generate new
+        if existing_event:
+            existing_ical = existing_event.icalendar_instance
+            existing_component = existing_ical.subcomponents[0]
+            existing_uid = existing_component['UID']
+            new_event['UID'] = existing_uid
+        else:
+            new_event['UID'] = str(uuid.uuid4())
+        
+        # Add our stable identifier property
+        new_event['X-SYNC-SOURCE-IDENTIFIER'] = source_identifier
+        
+        # Add event to calendar
+        new_cal.add_component(new_event)
+        
+        # Save to destination calendar
+        if existing_event:
+            existing_event.data = new_cal.to_ical()
+            existing_event.save()
+            logger.info(f"Updated existing event: {normalized_title} (Source Identifier: {source_identifier})")
+        else:
+            dest_calendar.save_event(new_cal.to_ical())
+            logger.info(f"Created new event: {normalized_title} (Source Identifier: {source_identifier})")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error creating/updating event: {e}")
+        return False
+```
+
+Finally, update the `sync_calendars` function to use the new identifier:
+
+```python
+def sync_calendars(config):
+    """Synchronize events from source to destination calendar."""
+    # Connect to destination calendar (CalDAV)
+    dest_calendar = connect_to_dest_calendar(
+        config['dest_url'], 
+        config['dest_username'], 
+        config['dest_password'],
+        config['dest_calendar_name']
+    )
+    
+    if not dest_calendar:
+        logger.error("Failed to connect to destination calendar")
+        return False
+    
+    # Fetch source calendar (iCalendar over HTTPS)
+    source_calendar = fetch_source_calendar(config['source_url'])
+    
+    if not source_calendar:
+        logger.error("Failed to fetch source calendar")
+        return False
+    
+    # Define date range for events
+    now = datetime.now(config['timezone'])
+    end_date = now + timedelta(days=config['days_ahead'])
+    
+    # Get events from source calendar within date range
+    source_events = get_source_events(source_calendar, now, end_date, config['timezone'])
+    logger.info(f"Found {len(source_events)} events in source calendar within date range")
+    
+    # Get all existing synced events from destination calendar
+    dest_events = get_dest_events(dest_calendar, config['normalized_title'])
+    logger.info(f"Found {len(dest_events)} existing synced events in destination calendar")
+    
+    # Keep track of processed source event identifiers
+    processed_source_identifiers = set()
+    
+    # Process each source event
+    for source_event in source_events:
+        # Generate a stable identifier for the source event
+        source_identifier = generate_event_identifier(source_event)
+        
+        # Add to our set of processed identifiers
+        processed_source_identifiers.add(source_identifier)
+        
+        # Find matching event in destination calendar
+        synced_event = find_synced_event(dest_events, source_identifier)
+        
+        if synced_event:
+            # Check if event details have changed
+            if event_details_changed(source_event, synced_event):
+                create_or_update_event(dest_calendar, source_event, 
+                                      config['normalized_title'], synced_event)
+            else:
+                logger.debug(f"No changes needed for event with identifier: {source_identifier}")
+        else:
+            # Create new event
+            create_or_update_event(dest_calendar, source_event, config['normalized_title'])
+    
+    # Remove destination events that no longer exist in source
+    removed_count = 0
+    for dest_event in dest_events:
+        event_ical = dest_event.icalendar_instance
+        event_component = event_ical.subcomponents[0]
+        source_identifier = event_component.get('X-SYNC-SOURCE-IDENTIFIER', '')
+        
+        if source_identifier and source_identifier not in processed_source_identifiers:
+            # This event no longer exists in source, delete it
+            try:
+                dest_event.delete()
+                removed_count += 1
+                logger.info(f"Deleted event from destination calendar (Source Identifier: {source_identifier})")
+            except Exception as e:
+                logger.error(f"Error deleting event with Source Identifier {source_identifier}: {e}")
+    
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} events from destination calendar that no longer exist in source")
+    
+    return True
+```
+
+## Update the `get_dest_events` Function
+
+Let's also update the `get_dest_events` function to look for our stable identifier property instead of X-SYNC-SOURCE-UID:
+
+```python
+def get_dest_events(dest_calendar, normalized_title):
+    """Get all events from destination calendar with the normalized title."""
+    try:
+        # Get all events from the destination calendar
+        all_events = dest_calendar.events()
+        
+        # Filter for events with our normalized title and our special property
+        synced_events = []
+        for event in all_events:
+            event_ical = event.icalendar_instance
+            event_component = event_ical.subcomponents[0]
+            
+            # Check if this is our synced event by title and custom property
+            if (event_component.get('SUMMARY', '') == normalized_title and
+                'X-SYNC-SOURCE-IDENTIFIER' in event_component):
+                synced_events.append(event)
+        
+        return synced_events
+    
+    except Exception as e:
+        logger.error(f"Error getting destination events: {e}")
+        return []
+```
+
+## Unit Test Updates
+
+You'll also need to update your unit tests to reflect these changes. Most importantly, you should add tests for the `generate_event_identifier` function to verify it creates stable identifiers.
+
+## Benefits of This Approach
+
+1. **Stability**: Events will be matched correctly even if they're deleted and recreated
+2. **Reliability**: Even if the calendar system changes UIDs frequently, we'll still identify matching events
+3. **Flexibility**: By hashing multiple properties, we create a more robust identification system
+
+This approach solves the core problem of the script by ensuring that events with the same meaningful properties (date, time, etc.) are treated as the same events, regardless of their underlying technical UIDs.
+
+### USER
+create a test for `generate_event_identifier` and update all of the other tests where needed
+
+### ASSISTANT
+# Unit Tests for Enhanced Event Identification
+
+Let's add a test for `generate_event_identifier` and update existing tests to reflect our changes:
+
+## 1. Test for generate_event_identifier
+
+```python
+def test_generate_event_identifier():
+    """Test generating stable identifiers for events"""
+    from datetime import datetime, date
+    from icalendar import Event
+    import pytz
+    
+    # Create a time-specific event
+    event1 = Event()
+    event1.add('summary', 'Team Meeting')
+    event1.add('dtstart', datetime(2023, 6, 1, 10, 0, 0, tzinfo=pytz.UTC))
+    event1.add('dtend', datetime(2023, 6, 1, 11, 0, 0, tzinfo=pytz.UTC))
+    event1.add('location', 'Conference Room A')
+    
+    # Create an identical event - should generate same ID
+    event2 = Event()
+    event2.add('summary', 'Team Meeting')
+    event2.add('dtstart', datetime(2023, 6, 1, 10, 0, 0, tzinfo=pytz.UTC))
+    event2.add('dtend', datetime(2023, 6, 1, 11, 0, 0, tzinfo=pytz.UTC))
+    event2.add('location', 'Conference Room A')
+    
+    # Create an event with different time - should generate different ID
+    event3 = Event()
+    event3.add('summary', 'Team Meeting')
+    event3.add('dtstart', datetime(2023, 6, 1, 14, 0, 0, tzinfo=pytz.UTC))  # Different time
+    event3.add('dtend', datetime(2023, 6, 1, 15, 0, 0, tzinfo=pytz.UTC))
+    event3.add('location', 'Conference Room A')
+    
+    # Create an all-day event
+    event4 = Event()
+    event4.add('summary', 'Company Holiday')
+    event4.add('dtstart', date(2023, 7, 4))
+    event4.add('dtend', date(2023, 7, 5))
+    
+    # Generate identifiers
+    id1 = generate_event_identifier(event1)
+    id2 = generate_event_identifier(event2)
+    id3 = generate_event_identifier(event3)
+    id4 = generate_event_identifier(event4)
+    
+    # Assertions
+    assert id1 == id2, "Identical events should have the same identifier"
+    assert id1 != id3, "Events with different times should have different identifiers"
+    assert id1 != id4, "All-day and time-specific events should have different identifiers"
+    
+    # Test error handling by passing an incomplete event
+    incomplete_event = Event()
+    # No dtstart added
+    incomplete_id = generate_event_identifier(incomplete_event)
+    assert incomplete_id, "Should return a fallback ID for incomplete events"
+```
+
+## 2. Updated test_find_synced_event_found
+
+```python
+def test_find_synced_event_found():
+    """Test finding matching synced event by source identifier"""
+    # Setup
+    event1 = MagicMock()
+    event1_component = MagicMock()
+    event1_component.get.side_effect = lambda key, default=None: 'source-id-1' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    event1.icalendar_instance.subcomponents = [event1_component]
+    
+    event2 = MagicMock()
+    event2_component = MagicMock()
+    event2_component.get.side_effect = lambda key, default=None: 'source-id-2' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    event2.icalendar_instance.subcomponents = [event2_component]
+    
+    synced_events = [event1, event2]
+    
+    # Call function
+    result = find_synced_event(synced_events, 'source-id-2')
+    
+    # Assertions
+    assert result == event2
+```
+
+## 3. Updated test_create_or_update_event
+
+```python
+@patch('calendar_sync.generate_event_identifier')
+@patch('calendar_sync.uuid.uuid4')
+def test_create_new_event(mock_uuid, mock_generate_id):
+    """Test creating a new event in destination calendar"""
+    # Setup
+    mock_uuid.return_value = 'new-uid-123'
+    mock_generate_id.return_value = 'generated-identifier-123'
+    dest_calendar = MagicMock()
+    
+    source_event = Event()
+    source_event.add('dtstart', datetime(2023, 6, 1, 10, 0, 0, tzinfo=pytz.UTC))
+    source_event.add('dtend', datetime(2023, 6, 1, 11, 0, 0, tzinfo=pytz.UTC))
+    source_event.add('location', 'Room 123')
+    source_event.add('uid', 'source-uid-123')
+    
+    # Call function
+    result = create_or_update_event(dest_calendar, source_event, 'Tucker Works')
+    
+    # Assertions
+    assert result == True
+    dest_calendar.save_event.assert_called_once()
+    
+    # Extract calendar from saved data
+    call_args = dest_calendar.save_event.call_args[0][0]
+    cal = Calendar.from_ical(call_args)
+    event = list(cal.walk('VEVENT'))[0]
+    
+    # Verify event properties
+    assert event['SUMMARY'] == 'Tucker Works'
+    assert event['UID'] == 'new-uid-123'
+    assert event['X-SYNC-SOURCE-IDENTIFIER'] == 'generated-identifier-123'
+    assert event['DTSTART'].dt == datetime(2023, 6, 1, 10, 0, 0, tzinfo=pytz.UTC)
+    assert event['DTEND'].dt == datetime(2023, 6, 1, 11, 0, 0, tzinfo=pytz.UTC)
+    assert event['LOCATION'] == 'Room 123'
+```
+
+## 4. Updated test_get_dest_events
+
+```python
+def test_get_dest_events():
+    """Test filtering events in the destination calendar by title and custom property"""
+    # Setup
+    mock_dest_calendar = MagicMock()
+    
+    # Event 1: Matching title and has X-SYNC-SOURCE-IDENTIFIER (should be included)
+    mock_event1 = MagicMock()
+    mock_event1_component = MagicMock()
+    mock_event1_component.get.side_effect = lambda key, default=None: {
+        'SUMMARY': 'Tucker Works',
+        'X-SYNC-SOURCE-IDENTIFIER': 'source-id-1'
+    }.get(key, default)
+    # Add __contains__ method to handle 'in' operator
+    mock_event1_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-IDENTIFIER']
+    mock_event1.icalendar_instance.subcomponents = [mock_event1_component]
+    
+    # Event 2: Matching title but no X-SYNC-SOURCE-IDENTIFIER (should be excluded)
+    mock_event2 = MagicMock()
+    mock_event2_component = MagicMock()
+    mock_event2_component.get.side_effect = lambda key, default=None: {
+        'SUMMARY': 'Tucker Works'
+    }.get(key, default)
+    # Add __contains__ method that returns False for X-SYNC-SOURCE-IDENTIFIER
+    mock_event2_component.__contains__.side_effect = lambda key: key in ['SUMMARY']
+    mock_event2.icalendar_instance.subcomponents = [mock_event2_component]
+    
+    # Event 3: Has X-SYNC-SOURCE-IDENTIFIER but different title (should be excluded)
+    mock_event3 = MagicMock()
+    mock_event3_component = MagicMock()
+    mock_event3_component.get.side_effect = lambda key, default=None: {
+        'SUMMARY': 'Different Title',
+        'X-SYNC-SOURCE-IDENTIFIER': 'source-id-3'
+    }.get(key, default)
+    mock_event3_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-IDENTIFIER']
+    mock_event3.icalendar_instance.subcomponents = [mock_event3_component]
+    
+    # Event 4: Another matching event (should be included)
+    mock_event4 = MagicMock()
+    mock_event4_component = MagicMock()
+    mock_event4_component.get.side_effect = lambda key, default=None: {
+        'SUMMARY': 'Tucker Works',
+        'X-SYNC-SOURCE-IDENTIFIER': 'source-id-4'
+    }.get(key, default)
+    mock_event4_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-IDENTIFIER']
+    mock_event4.icalendar_instance.subcomponents = [mock_event4_component]
+    
+    # Set up calendar to return all events
+    mock_dest_calendar.events.return_value = [mock_event1, mock_event2, mock_event3, mock_event4]
+    
+    # Call function
+    result = get_dest_events(mock_dest_calendar, 'Tucker Works')
+    
+    # Assertions
+    assert len(result) == 2
+    assert mock_event1 in result
+    assert mock_event2 not in result
+    assert mock_event3 not in result
+    assert mock_event4 in result
+    
+    # Verify the calendar's events method was called
+    mock_dest_calendar.events.assert_called_once()
+```
+
+## 5. Updated test_sync_calendars_removes_orphaned_events
+
+```python
+@patch('calendar_sync.connect_to_dest_calendar')
+@patch('calendar_sync.fetch_source_calendar')
+@patch('calendar_sync.get_source_events')
+@patch('calendar_sync.get_dest_events')
+@patch('calendar_sync.generate_event_identifier')  # Mock this to return fixed values
+def test_sync_calendars_removes_orphaned_events(mock_generate_id, mock_get_dest, 
+                                              mock_get_source, mock_fetch, mock_connect):
+    """Test that events are removed from destination if they no longer exist in source"""
+    # Setup
+    mock_dest_calendar = MagicMock()
+    mock_connect.return_value = mock_dest_calendar
+    
+    mock_source_calendar = MagicMock()
+    mock_fetch.return_value = mock_source_calendar
+    
+    # Create one source event and set the identifier generator to return a fixed value
+    mock_source_event = MagicMock()
+    mock_get_source.return_value = [mock_source_event]
+    # Make generate_event_identifier return 'src-id-1' for our source event
+    mock_generate_id.return_value = 'src-id-1'
+    
+    # Create two destination events - one matching source, one orphaned
+    mock_dest_event1 = MagicMock()
+    mock_dest_event1_component = MagicMock()
+    mock_dest_event1_component.get.side_effect = lambda key, default=None: 'src-id-1' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    mock_dest_event1.icalendar_instance.subcomponents = [mock_dest_event1_component]
+    
+    mock_dest_event2 = MagicMock()
+    mock_dest_event2_component = MagicMock()
+    mock_dest_event2_component.get.side_effect = lambda key, default=None: 'src-id-2' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    mock_dest_event2.icalendar_instance.subcomponents = [mock_dest_event2_component]
+    
+    mock_get_dest.return_value = [mock_dest_event1, mock_dest_event2]
+    
+    # Also need to mock the other functions called during event processing
+    with patch('calendar_sync.find_synced_event', return_value=None) as mock_find_synced:
+        with patch('calendar_sync.create_or_update_event', return_value=True) as mock_create_update:
+            
+            config = {
+                'dest_url': 'https://caldav.icloud.com/',
+                'dest_username': 'user',
+                'dest_password': 'pass',
+                'dest_calendar_name': 'Work Calendar',
+                'source_url': 'https://source.com/cal.ics',
+                'normalized_title': 'Tucker Works',
+                'days_ahead': 30,
+                'timezone': pytz.UTC
+            }
+            
+            # Call function
+            result = sync_calendars(config)
+            
+            # Assertions
+            assert result == True
+            
+            # Create or update should be called for the source event
+            mock_create_update.assert_called_once()
+            
+            # The second destination event should be deleted as it has no matching source event
+            mock_dest_event2.delete.assert_called_once()
+            
+            # The first destination event should NOT be deleted
+            mock_dest_event1.delete.assert_not_called()
+```
+
+## 6. Additional test for identifier stability across UIDs
+
+```python
+def test_identifier_stability_across_uids():
+    """Test that identifiers remain stable even when UIDs change"""
+    from datetime import datetime
+    from icalendar import Event
+    import pytz
+    
+    # Create an event with one UID
+    event1 = Event()
+    event1.add('summary', 'Weekly Status Update')
+    event1.add('dtstart', datetime(2023, 6, 7, 9, 0, 0, tzinfo=pytz.UTC))
+    event1.add('dtend', datetime(2023, 6, 7, 10, 0, 0, tzinfo=pytz.UTC))
+    event1.add('location', 'Meeting Room 1')
+    event1.add('uid', 'original-uid-123')
+    
+    # Create identical event but with different UID
+    event2 = Event()
+    event2.add('summary', 'Weekly Status Update')
+    event2.add('dtstart', datetime(2023, 6, 7, 9, 0, 0, tzinfo=pytz.UTC))
+    event2.add('dtend', datetime(2023, 6, 7, 10, 0, 0, tzinfo=pytz.UTC))
+    event2.add('location', 'Meeting Room 1')
+    event2.add('uid', 'new-uid-456')  # Different UID
+    
+    # Generate identifiers
+    id1 = generate_event_identifier(event1)
+    id2 = generate_event_identifier(event2)
+    
+    # Assertion
+    assert id1 == id2, "Events with identical properties but different UIDs should have the same identifier"
+```
+
+These tests verify that the enhanced event identification system works correctly, ensuring that:
+
+1. Events with the same core properties get the same identifier, regardless of UID
+2. Events with different properties get different identifiers
+3. The functions properly handle the new identifier approach
+4. Events in the destination calendar that don't match any current source event are properly removed
+
+This approach solves the key issue of events being recreated unnecessarily when the source calendar deletes and recreates events with new UIDs. Instead of relying on UIDs, we now rely on the event's actual content to determine its identity.
+
+### USER
+`test_sync_calendars_handles_delete_errors` is now failing with the below message  
+```  
+mock_get_dest = <MagicMock name='get_dest_events' id='4352142416'>
+mock_get_source = <MagicMock name='get_source_events' id='4352142352'>
+mock_fetch = <MagicMock name='fetch_source_calendar' id='4352137168'>
+mock_connect = <MagicMock name='connect_to_dest_calendar' id='4352203024'>
+    @patch("calendar_sync.connect_to_dest_calendar")
+    @patch("calendar_sync.fetch_source_calendar")
+    @patch("calendar_sync.get_source_events")
+    @patch("calendar_sync.get_dest_events")
+    def test_sync_calendars_handles_delete_errors(
+        mock_get_dest, mock_get_source, mock_fetch, mock_connect
+    ):
+        """Test that errors during event deletion are handled gracefully"""
+        # Setup
+        mock_dest_calendar = MagicMock()
+        mock_connect.return_value = mock_dest_calendar
+        mock_source_calendar = MagicMock()
+        mock_fetch.return_value = mock_source_calendar
+        # No source events
+        mock_get_source.return_value = []
+        # One destination event that should be deleted
+        mock_dest_event = MagicMock()
+        mock_dest_event_component = MagicMock()
+        mock_dest_event_component.get.side_effect = (
+            lambda key, default=None: "orphaned-uid"
+            if key == "X-SYNC-SOURCE-UID"
+            else default
+        )
+        mock_dest_event.icalendar_instance.subcomponents = [mock_dest_event_component]
+        # Make the delete method raise an exception
+        mock_dest_event.delete.side_effect = Exception("Delete failed")
+        mock_get_dest.return_value = [mock_dest_event]
+        config = {
+            "dest_url": "https://caldav.icloud.com/",
+            "dest_username": "user",
+            "dest_password": "pass",
+            "dest_calendar_name": "Work Calendar",
+            "source_url": "https://source.com/cal.ics",
+            "normalized_title": "Tucker Works",
+            "days_ahead": 30,
+            "timezone": pytz.UTC,
+        }
+        # Call function
+        result = sync_calendars(config)
+        # Assertions
+        assert result is True  # Should still return True despite the delete error
+>       mock_dest_event.delete.assert_called_once()  # Delete was attempted
+test_calendar_sync.py:603:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+self = <MagicMock name='mock.delete' id='4351582608'>
+    def assert_called_once(self):
+        """assert that the mock was called only once.
+        """
+        if not self.call_count == 1:
+            msg = ("Expected '%s' to have been called once. Called %s times.%s"
+                   % (self._mock_name or 'mock',
+                      self.call_count,
+                      self._calls_repr()))
+>           raise AssertionError(msg)
+E           AssertionError: Expected 'delete' to have been called once. Called 0 times.
+/Users/rparrish/.pyenv/versions/3.11.8/lib/python3.11/unittest/mock.py:918: AssertionError
+```
+
+### ASSISTANT
+# Updated Test for Delete Error Handling
+
+The test is failing because we've changed our code to use `X-SYNC-SOURCE-IDENTIFIER` instead of `X-SYNC-SOURCE-UID`, but this test still references the old property. Let's update it:
+
+```python
+@patch("calendar_sync.connect_to_dest_calendar")
+@patch("calendar_sync.fetch_source_calendar")
+@patch("calendar_sync.get_source_events")
+@patch("calendar_sync.get_dest_events")
+def test_sync_calendars_handles_delete_errors(
+    mock_get_dest, mock_get_source, mock_fetch, mock_connect
+):
+    """Test that errors during event deletion are handled gracefully"""
+    # Setup
+    mock_dest_calendar = MagicMock()
+    mock_connect.return_value = mock_dest_calendar
+    
+    mock_source_calendar = MagicMock()
+    mock_fetch.return_value = mock_source_calendar
+    
+    # No source events
+    mock_get_source.return_value = []
+    
+    # One destination event that should be deleted
+    mock_dest_event = MagicMock()
+    mock_dest_event_component = MagicMock()
+    
+    # Use X-SYNC-SOURCE-IDENTIFIER instead of X-SYNC-SOURCE-UID
+    mock_dest_event_component.get.side_effect = (
+        lambda key, default=None: "orphaned-id"
+        if key == "X-SYNC-SOURCE-IDENTIFIER"
+        else default
+    )
+    
+    # Also need to implement __contains__ for 'in' operator checks
+    mock_dest_event_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-IDENTIFIER']
+    
+    mock_dest_event.icalendar_instance.subcomponents = [mock_dest_event_component]
+    
+    # Make the delete method raise an exception
+    mock_dest_event.delete.side_effect = Exception("Delete failed")
+    
+    mock_get_dest.return_value = [mock_dest_event]
+    
+    config = {
+        "dest_url": "https://caldav.icloud.com/",
+        "dest_username": "user",
+        "dest_password": "pass",
+        "dest_calendar_name": "Work Calendar",
+        "source_url": "https://source.com/cal.ics",
+        "normalized_title": "Tucker Works",
+        "days_ahead": 30,
+        "timezone": pytz.UTC,
+    }
+    
+    # Call function
+    result = sync_calendars(config)
+    
+    # Assertions
+    assert result is True  # Should still return True despite the delete error
+    mock_dest_event.delete.assert_called_once()  # Delete was attempted
+```
+
+## Key Changes
+
+1. Changed `X-SYNC-SOURCE-UID` to `X-SYNC-SOURCE-IDENTIFIER` in the mock setup
+2. Added `__contains__` implementation to the mock component to handle 'in' operator checks
+3. Used a different identifier string ("orphaned-id") to clearly differentiate from UIDs
+
+This test verifies that even when an error occurs during event deletion (simulated with the mock's `delete.side_effect`), the synchronization process continues gracefully and returns success.
+
+All tests should now correctly reflect our updated approach of using stable identifiers based on event content rather than UIDs.
