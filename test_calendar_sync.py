@@ -17,7 +17,7 @@ from calendar_sync import (
     create_or_update_event,
     connect_to_dest_calendar,
     sync_calendars,
-get_dest_events
+    get_dest_events,
 )
 
 
@@ -488,13 +488,14 @@ def test_sync_calendars_dest_connection_failure(mock_connect):
     mock_connect.assert_called_once()
 
 
-@patch('calendar_sync.connect_to_dest_calendar')
-@patch('calendar_sync.fetch_source_calendar')
-@patch('calendar_sync.get_source_events')
-@patch('calendar_sync.get_dest_events')
-@patch('calendar_sync.get_source_event_uid')  # Mock this to return a fixed value
-def test_sync_calendars_removes_orphaned_events(mock_get_source_uid, mock_get_dest,
-                                                mock_get_source, mock_fetch, mock_connect):
+@patch("calendar_sync.connect_to_dest_calendar")
+@patch("calendar_sync.fetch_source_calendar")
+@patch("calendar_sync.get_source_events")
+@patch("calendar_sync.get_dest_events")
+@patch("calendar_sync.get_source_event_uid")  # Mock this to return a fixed value
+def test_sync_calendars_removes_orphaned_events(
+    mock_get_source_uid, mock_get_dest, mock_get_source, mock_fetch, mock_connect
+):
     """Test that events are removed from destination if they no longer exist in source"""
     # Setup
     mock_dest_calendar = MagicMock()
@@ -506,34 +507,42 @@ def test_sync_calendars_removes_orphaned_events(mock_get_source_uid, mock_get_de
     # Create one source event and set the UID getter to return a fixed value
     mock_source_event = MagicMock()
     mock_get_source.return_value = [mock_source_event]
-    mock_get_source_uid.return_value = 'src-uid-1'
+    mock_get_source_uid.return_value = "src-uid-1"
 
     # Create two destination events - one matching source, one orphaned
     mock_dest_event1 = MagicMock()
     mock_dest_event1_component = MagicMock()
-    mock_dest_event1_component.get.side_effect = lambda key, default=None: 'src-uid-1' if key == 'X-SYNC-SOURCE-UID' else default
+    mock_dest_event1_component.get.side_effect = (
+        lambda key, default=None: "src-uid-1" if key == "X-SYNC-SOURCE-UID" else default
+    )
     mock_dest_event1.icalendar_instance.subcomponents = [mock_dest_event1_component]
 
     mock_dest_event2 = MagicMock()
     mock_dest_event2_component = MagicMock()
-    mock_dest_event2_component.get.side_effect = lambda key, default=None: 'src-uid-2' if key == 'X-SYNC-SOURCE-UID' else default
+    mock_dest_event2_component.get.side_effect = (
+        lambda key, default=None: "src-uid-2" if key == "X-SYNC-SOURCE-UID" else default
+    )
     mock_dest_event2.icalendar_instance.subcomponents = [mock_dest_event2_component]
 
     mock_get_dest.return_value = [mock_dest_event1, mock_dest_event2]
 
     # Also need to mock the other functions called during event processing
     # These are internal function calls, so we can patch them directly in the module
-    with patch('calendar_sync.find_synced_event', return_value=None) as mock_find_synced:
-        with patch('calendar_sync.create_or_update_event', return_value=True) as mock_create_update:
+    with patch(
+        "calendar_sync.find_synced_event", return_value=None
+    ) as mock_find_synced:
+        with patch(
+            "calendar_sync.create_or_update_event", return_value=True
+        ) as mock_create_update:
             config = {
-                'dest_url': 'https://caldav.icloud.com/',
-                'dest_username': 'user',
-                'dest_password': 'pass',
-                'dest_calendar_name': 'Work Calendar',
-                'source_url': 'https://source.com/cal.ics',
-                'normalized_title': 'Tucker Works',
-                'days_ahead': 30,
-                'timezone': pytz.UTC
+                "dest_url": "https://caldav.icloud.com/",
+                "dest_username": "user",
+                "dest_password": "pass",
+                "dest_calendar_name": "Work Calendar",
+                "source_url": "https://source.com/cal.ics",
+                "normalized_title": "Tucker Works",
+                "days_ahead": 30,
+                "timezone": pytz.UTC,
             }
 
             # Call function
@@ -552,12 +561,13 @@ def test_sync_calendars_removes_orphaned_events(mock_get_source_uid, mock_get_de
             mock_dest_event1.delete.assert_not_called()
 
 
-@patch('calendar_sync.connect_to_dest_calendar')
-@patch('calendar_sync.fetch_source_calendar')
-@patch('calendar_sync.get_source_events')
-@patch('calendar_sync.get_dest_events')
-def test_sync_calendars_handles_delete_errors(mock_get_dest, mock_get_source,
-                                              mock_fetch, mock_connect):
+@patch("calendar_sync.connect_to_dest_calendar")
+@patch("calendar_sync.fetch_source_calendar")
+@patch("calendar_sync.get_source_events")
+@patch("calendar_sync.get_dest_events")
+def test_sync_calendars_handles_delete_errors(
+    mock_get_dest, mock_get_source, mock_fetch, mock_connect
+):
     """Test that errors during event deletion are handled gracefully"""
     # Setup
     mock_dest_calendar = MagicMock()
@@ -572,7 +582,11 @@ def test_sync_calendars_handles_delete_errors(mock_get_dest, mock_get_source,
     # One destination event that should be deleted
     mock_dest_event = MagicMock()
     mock_dest_event_component = MagicMock()
-    mock_dest_event_component.get.side_effect = lambda key, default=None: 'orphaned-uid' if key == 'X-SYNC-SOURCE-UID' else default
+    mock_dest_event_component.get.side_effect = (
+        lambda key, default=None: "orphaned-uid"
+        if key == "X-SYNC-SOURCE-UID"
+        else default
+    )
     mock_dest_event.icalendar_instance.subcomponents = [mock_dest_event_component]
 
     # Make the delete method raise an exception
@@ -581,14 +595,14 @@ def test_sync_calendars_handles_delete_errors(mock_get_dest, mock_get_source,
     mock_get_dest.return_value = [mock_dest_event]
 
     config = {
-        'dest_url': 'https://caldav.icloud.com/',
-        'dest_username': 'user',
-        'dest_password': 'pass',
-        'dest_calendar_name': 'Work Calendar',
-        'source_url': 'https://source.com/cal.ics',
-        'normalized_title': 'Tucker Works',
-        'days_ahead': 30,
-        'timezone': pytz.UTC
+        "dest_url": "https://caldav.icloud.com/",
+        "dest_username": "user",
+        "dest_password": "pass",
+        "dest_calendar_name": "Work Calendar",
+        "source_url": "https://source.com/cal.ics",
+        "normalized_title": "Tucker Works",
+        "days_ahead": 30,
+        "timezone": pytz.UTC,
     }
 
     # Call function
@@ -608,48 +622,62 @@ def test_get_dest_events():
     mock_event1 = MagicMock()
     mock_event1_component = MagicMock()
     mock_event1_component.get.side_effect = lambda key, default=None: {
-        'SUMMARY': 'Tucker Works',
-        'X-SYNC-SOURCE-UID': 'source-uid-1'
+        "SUMMARY": "Tucker Works",
+        "X-SYNC-SOURCE-UID": "source-uid-1",
     }.get(key, default)
     # Add __contains__ method to handle 'in' operator
-    mock_event1_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-UID']
+    mock_event1_component.__contains__.side_effect = lambda key: key in [
+        "SUMMARY",
+        "X-SYNC-SOURCE-UID",
+    ]
     mock_event1.icalendar_instance.subcomponents = [mock_event1_component]
 
     # Event 2: Matching title but no X-SYNC-SOURCE-UID (should be excluded)
     mock_event2 = MagicMock()
     mock_event2_component = MagicMock()
     mock_event2_component.get.side_effect = lambda key, default=None: {
-        'SUMMARY': 'Tucker Works'
+        "SUMMARY": "Tucker Works"
     }.get(key, default)
     # Add __contains__ method that returns False for X-SYNC-SOURCE-UID
-    mock_event2_component.__contains__.side_effect = lambda key: key in ['SUMMARY']
+    mock_event2_component.__contains__.side_effect = lambda key: key in ["SUMMARY"]
     mock_event2.icalendar_instance.subcomponents = [mock_event2_component]
 
     # Event 3: Has X-SYNC-SOURCE-UID but different title (should be excluded)
     mock_event3 = MagicMock()
     mock_event3_component = MagicMock()
     mock_event3_component.get.side_effect = lambda key, default=None: {
-        'SUMMARY': 'Different Title',
-        'X-SYNC-SOURCE-UID': 'source-uid-3'
+        "SUMMARY": "Different Title",
+        "X-SYNC-SOURCE-UID": "source-uid-3",
     }.get(key, default)
-    mock_event3_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-UID']
+    mock_event3_component.__contains__.side_effect = lambda key: key in [
+        "SUMMARY",
+        "X-SYNC-SOURCE-UID",
+    ]
     mock_event3.icalendar_instance.subcomponents = [mock_event3_component]
 
     # Event 4: Another matching event (should be included)
     mock_event4 = MagicMock()
     mock_event4_component = MagicMock()
     mock_event4_component.get.side_effect = lambda key, default=None: {
-        'SUMMARY': 'Tucker Works',
-        'X-SYNC-SOURCE-UID': 'source-uid-4'
+        "SUMMARY": "Tucker Works",
+        "X-SYNC-SOURCE-UID": "source-uid-4",
     }.get(key, default)
-    mock_event4_component.__contains__.side_effect = lambda key: key in ['SUMMARY', 'X-SYNC-SOURCE-UID']
+    mock_event4_component.__contains__.side_effect = lambda key: key in [
+        "SUMMARY",
+        "X-SYNC-SOURCE-UID",
+    ]
     mock_event4.icalendar_instance.subcomponents = [mock_event4_component]
 
     # Set up calendar to return all events
-    mock_dest_calendar.events.return_value = [mock_event1, mock_event2, mock_event3, mock_event4]
+    mock_dest_calendar.events.return_value = [
+        mock_event1,
+        mock_event2,
+        mock_event3,
+        mock_event4,
+    ]
 
     # Call function
-    result = get_dest_events(mock_dest_calendar, 'Tucker Works')
+    result = get_dest_events(mock_dest_calendar, "Tucker Works")
 
     # Assertions
     assert len(result) == 2

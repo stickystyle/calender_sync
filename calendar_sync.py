@@ -175,7 +175,7 @@ def get_source_events(calendar, start_date, end_date, timezone):
     for component in calendar.walk():
         if component.name == "VEVENT":
             # Get start and end times
-            dtstart = component.get('dtstart').dt
+            dtstart = component.get("dtstart").dt
 
             # Handle all-day events (date only, no time)
             if isinstance(dtstart, datetime):
@@ -184,30 +184,37 @@ def get_source_events(calendar, start_date, end_date, timezone):
                 event_start = dtstart
             else:
                 # All-day event, convert to datetime at midnight
-                event_start = timezone.localize(datetime.combine(dtstart, datetime.min.time()))
+                event_start = timezone.localize(
+                    datetime.combine(dtstart, datetime.min.time())
+                )
 
             # Check if event has DTEND, if not, use DTSTART
-            if component.get('dtend'):
-                dtend = component.get('dtend').dt
+            if component.get("dtend"):
+                dtend = component.get("dtend").dt
                 if isinstance(dtend, datetime):
                     if dtend.tzinfo is None:
                         dtend = timezone.localize(dtend)
                     event_end = dtend
                 else:
                     # All-day event, convert to datetime at midnight
-                    event_end = timezone.localize(datetime.combine(dtend, datetime.min.time()))
+                    event_end = timezone.localize(
+                        datetime.combine(dtend, datetime.min.time())
+                    )
             else:
                 # If no end time, assume same as start time
                 event_end = event_start
 
             # Check if event is within our date range
-            if (start_date <= event_start <= end_date) or \
-                    (start_date <= event_end <= end_date) or \
-                    (event_start <= start_date and event_end >= end_date):
+            if (
+                (start_date <= event_start <= end_date)
+                or (start_date <= event_end <= end_date)
+                or (event_start <= start_date and event_end >= end_date)
+            ):
                 events.append(component)
 
     logger.debug(f"Found {len(events)} events in source calendar within date range")
     return events
+
 
 def get_dest_events(dest_calendar, normalized_title):
     """Get all events from destination calendar with the normalized title."""
