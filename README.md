@@ -4,7 +4,11 @@ A Python script that synchronizes calendar events from a source calendar to a de
 
 ## Background
 
-This tool was created to solve a specific problem: keeping track of a work schedule that's shared via a frequently-updating calendar system. Also to serve as an experiment for an old-school python developer using AI tools.
+This tool was created to solve a specific problem: keeping track of a work schedule that's shared via a frequently-updating calendar system.
+
+I had already created a similar script, so this version became an experiment for an old-school python developer using AI tools.
+I used the Claude Sonnet 3.7 thinking model via [OpenRouter.ai](openrouter.ai) and a self-hosted [OpenWebUI](https://github.com/open-webui/open-webui) to generate all the code via chat. 
+The solutions developed by Claude were very simlar to what I originally wrote, but there were some Claude definitely had some good ideas that I missed in my original script. Total cost of this experiment was $0.09 (!!)
 
 **The Problem:**
 - Work scheduling software updates its calendar by deleting and recreating all events every hour
