@@ -551,12 +551,13 @@ def test_sync_calendars_removes_orphaned_events(mock_generate_id, mock_get_dest,
             mock_dest_event1.delete.assert_not_called()
 
 
-@patch("calendar_sync.connect_to_dest_calendar")
-@patch("calendar_sync.fetch_source_calendar")
-@patch("calendar_sync.get_source_events")
-@patch("calendar_sync.get_dest_events")
+@patch('calendar_sync.connect_to_dest_calendar')
+@patch('calendar_sync.fetch_source_calendar')
+@patch('calendar_sync.get_source_events')
+@patch('calendar_sync.get_dest_events')
+@patch('calendar_sync.is_event_in_past')  # Add this to control past/future status
 def test_sync_calendars_handles_delete_errors(
-        mock_get_dest, mock_get_source, mock_fetch, mock_connect
+        mock_is_past, mock_get_dest, mock_get_source, mock_fetch, mock_connect
 ):
     """Test that errors during event deletion are handled gracefully"""
     # Setup
@@ -588,6 +589,9 @@ def test_sync_calendars_handles_delete_errors(
     # Make the delete method raise an exception
     mock_dest_event.delete.side_effect = Exception("Delete failed")
 
+    # Set up is_event_in_past to return False (not a past event)
+    mock_is_past.return_value = False
+
     mock_get_dest.return_value = [mock_dest_event]
 
     config = {
@@ -607,7 +611,6 @@ def test_sync_calendars_handles_delete_errors(
     # Assertions
     assert result is True  # Should still return True despite the delete error
     mock_dest_event.delete.assert_called_once()  # Delete was attempted
-
 
 def test_get_dest_events():
     """Test filtering events in the destination calendar by title and custom property"""
@@ -751,3 +754,115 @@ def test_identifier_stability_across_uids():
 
     # Assertion
     assert id1 == id2, "Events with identical properties but different UIDs should have the same identifier"
+
+
+def test_is_event_in_past():
+    """Test detection of events that are in the past"""
+    # Setup - current time is 2023-07-01 12:00 UTC
+    from calendar_sync import is_event_in_past
+    current_time = datetime(2023, 7, 1, 12, 0, 0, tzinfo=pytz.UTC)
+
+    # Create a past event (ended before current time)
+    past_event = MagicMock()
+    past_event_component = MagicMock()
+    past_event_component.__contains__.side_effect = lambda key: key in ['DTEND']
+    past_event_component.__getitem__.side_effect = lambda key: MagicMock(
+        dt=datetime(2023, 6, 30, 15, 0, 0, tzinfo=pytz.UTC)) if key == 'DTEND' else None
+    past_event.icalendar_instance.subcomponents = [past_event_component]
+
+    # Create a current/future event (ends after current time)
+    future_event = MagicMock()
+    future_event_component = MagicMock()
+    future_event_component.__contains__.side_effect = lambda key: key in ['DTEND']
+    future_event_component.__getitem__.side_effect = lambda key: MagicMock(
+        dt=datetime(2023, 7, 2, 15, 0, 0, tzinfo=pytz.UTC)) if key == 'DTEND' else None
+    future_event.icalendar_instance.subcomponents = [future_event_component]
+
+    # Create a past all-day event
+    past_allday_event = MagicMock()
+    past_allday_component = MagicMock()
+    past_allday_component.__contains__.side_effect = lambda key: key in ['DTEND']
+    past_allday_component.__getitem__.side_effect = lambda key: MagicMock(
+        dt=date(2023, 6, 30)) if key == 'DTEND' else None
+    past_allday_event.icalendar_instance.subcomponents = [past_allday_component]
+
+    # Assertions
+    assert is_event_in_past(past_event, current_time) is True
+    assert is_event_in_past(future_event, current_time) is False
+    assert is_event_in_past(past_allday_event, current_time) is True
+
+
+@patch('calendar_sync.connect_to_dest_calendar')
+@patch('calendar_sync.fetch_source_calendar')
+@patch('calendar_sync.get_source_events')
+@patch('calendar_sync.get_dest_events')
+@patch('calendar_sync.generate_event_identifier')
+@patch('calendar_sync.is_event_in_past')  # Mock this to control event past/future status
+def test_sync_calendars_preserves_past_orphaned_events(
+        mock_is_past, mock_generate_id, mock_get_dest, mock_get_source, mock_fetch, mock_connect
+):
+    """Test that past events are preserved even if they no longer exist in source"""
+    # Setup
+    mock_dest_calendar = MagicMock()
+    mock_connect.return_value = mock_dest_calendar
+
+    mock_source_calendar = MagicMock()
+    mock_fetch.return_value = mock_source_calendar
+
+    # Create one source event
+    mock_source_event = MagicMock()
+    mock_get_source.return_value = [mock_source_event]
+    mock_generate_id.return_value = 'src-id-1'
+
+    # Create three destination events:
+    # 1. Matching source (should be kept)
+    # 2. Orphaned but in the past (should be kept)
+    # 3. Orphaned and in the future (should be deleted)
+    mock_dest_event1 = MagicMock()
+    mock_dest_event1_component = MagicMock()
+    mock_dest_event1_component.get.side_effect = lambda key,default=None: 'src-id-1' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    mock_dest_event1.icalendar_instance.subcomponents = [mock_dest_event1_component]
+
+    mock_dest_event2 = MagicMock()
+    mock_dest_event2_component = MagicMock()
+    mock_dest_event2_component.get.side_effect = lambda key,default=None: 'src-id-2' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    mock_dest_event2.icalendar_instance.subcomponents = [mock_dest_event2_component]
+
+    mock_dest_event3 = MagicMock()
+    mock_dest_event3_component = MagicMock()
+    mock_dest_event3_component.get.side_effect = lambda key,default=None: 'src-id-3' if key == 'X-SYNC-SOURCE-IDENTIFIER' else default
+    mock_dest_event3.icalendar_instance.subcomponents = [mock_dest_event3_component]
+
+    mock_get_dest.return_value = [mock_dest_event1, mock_dest_event2, mock_dest_event3]
+
+    # Set up is_event_in_past to return True for event 2, False for others
+    mock_is_past.side_effect = lambda event, now: event is mock_dest_event2
+
+    # Mock find_synced_event to return none (simulating new events)
+    with patch('calendar_sync.find_synced_event', return_value=None) as mock_find_synced:
+        with patch('calendar_sync.create_or_update_event', return_value=True) as mock_create_update:
+            config = {
+                'dest_url': 'https://caldav.icloud.com/',
+                'dest_username': 'user',
+                'dest_password': 'pass',
+                'dest_calendar_name': 'Work Calendar',
+                'source_url': 'https://source.com/cal.ics',
+                'normalized_title': 'Tucker Works',
+                'days_ahead': 30,
+                'timezone': pytz.UTC
+            }
+
+            # Call function
+            result = sync_calendars(config)
+
+            # Assertions
+            assert result == True
+
+            # First event should not be deleted (matches source)
+            mock_dest_event1.delete.assert_not_called()
+
+            # Second event should not be deleted (it's in the past)
+            mock_dest_event2.delete.assert_not_called()
+
+            # Third event should be deleted (orphaned and in the future)
+            mock_dest_event3.delete.assert_called_once()

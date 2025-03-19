@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time, date
 
 import caldav
 import pytz
@@ -439,27 +439,37 @@ def sync_calendars(config):
             # Create new event
             create_or_update_event(dest_calendar, source_event, config['normalized_title'])
 
-    # Remove destination events that no longer exist in source
+    # Remove destination events that no longer exist in source (except past events)
     removed_count = 0
+    preserved_count = 0
+
     for dest_event in dest_events:
         event_ical = dest_event.icalendar_instance
         event_component = event_ical.subcomponents[0]
         source_identifier = event_component.get('X-SYNC-SOURCE-IDENTIFIER', '')
 
         if source_identifier and source_identifier not in processed_source_identifiers:
-            # This event no longer exists in source, delete it
-            try:
-                dest_event.delete()
-                removed_count += 1
-                logger.info(f"Deleted event from destination calendar (Source Identifier: {source_identifier})")
-            except Exception as e:
-                logger.error(f"Error deleting event with Source Identifier {source_identifier}: {e}")
+            # Check if this event is in the past
+            if is_event_in_past(dest_event, now):
+                # This is a past event, preserve it
+                preserved_count += 1
+                logger.debug(f"Preserved past event in destination calendar (Identifier: {source_identifier})")
+            else:
+                # This is a future/current event that no longer exists in source, delete it
+                try:
+                    dest_event.delete()
+                    removed_count += 1
+                    logger.info(f"Deleted event from destination calendar (Identifier: {source_identifier})")
+                except Exception as e:
+                    logger.error(f"Error deleting event with identifier {source_identifier}: {e}")
 
     if removed_count > 0:
-        logger.info(f"Removed {removed_count} events from destination calendar that no longer exist in source")
+        logger.info(f"Removed {removed_count} future events that no longer exist in source")
+
+    if preserved_count > 0:
+        logger.info(f"Preserved {preserved_count} past events for historical record")
 
     return True
-
 
 def generate_event_identifier(event):
     """Generate a stable identifier for an event based on its properties.
@@ -508,6 +518,49 @@ def generate_event_identifier(event):
             return event.get('uid', str(uuid.uuid4()))
         except:
             return str(uuid.uuid4())
+
+
+def is_event_in_past(event, current_time):
+    """
+    Determine if an event is in the past (has ended before current_time).
+
+    Args:
+        event: CalDAV event to check
+        current_time: datetime object representing the current time (with timezone)
+
+    Returns:
+        bool: True if the event has ended and is in the past, False otherwise
+    """
+    try:
+        event_ical = event.icalendar_instance
+        event_component = event_ical.subcomponents[0]
+
+        # Get end time of the event
+        if 'DTEND' in event_component:
+            dtend = event_component['DTEND'].dt
+        elif 'DTSTART' in event_component:
+            # If no end time, use start time (assuming it's a point-in-time event)
+            dtend = event_component['DTSTART'].dt
+        else:
+            # If no time information, assume it's not in the past
+            return False
+
+        # If it's a date (all-day event) rather than datetime
+        if isinstance(dtend, date) and not isinstance(dtend, datetime):
+            # Convert to datetime at the end of day
+            dtend = datetime.combine(dtend, time(23, 59, 59))
+
+            # Add timezone if current_time has one
+            if current_time.tzinfo:
+                dtend = current_time.tzinfo.localize(dtend)
+
+        # Compare end time with current time
+        return dtend < current_time
+
+    except Exception as e:
+        logger.error(f"Error checking if event is in past: {e}")
+        # If we can't determine, assume it's not in the past to be safe
+        return False
 
 def main():
     """Main function to run the calendar sync."""
